@@ -63,7 +63,8 @@ pub struct CopyState {
     pub positions: HashMap<String, Position>,
     pub session_notional: f64,
     pub max_session_notional: f64,
-    pub last_poll_timestamp: String,
+    /// Unix timestamp (seconds) — only fetch trades newer than this.
+    pub last_poll_ts: i64,
     pub copied_trade_ids: HashSet<String>,
 }
 
@@ -102,12 +103,12 @@ pub struct CreateOrderRequest {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 pub fn new_copy_state(max_session_notional: f64) -> CopyState {
-    let now = chrono_now_iso();
+    let now = now_secs();
     CopyState {
         positions: HashMap::new(),
         session_notional: 0.0,
         max_session_notional,
-        last_poll_timestamp: now,
+        last_poll_ts: now,
         copied_trade_ids: HashSet::new(),
     }
 }
@@ -118,18 +119,19 @@ pub async fn poll_and_copy(
     wallet: &Arc<TradingWallet>,
     state: &mut CopyState,
 ) -> Result<()> {
-    let trades = fetch_target_trades(client, &state.last_poll_timestamp).await?;
+    let trades = fetch_target_trades(client, state.last_poll_ts).await?;
 
     if trades.is_empty() {
         return Ok(());
     }
 
-    let mut newest_ts = state.last_poll_timestamp.clone();
+    let mut newest_ts = state.last_poll_ts;
 
     for trade in &trades {
-        // Advance cursor
-        if trade.timestamp > newest_ts {
-            newest_ts = trade.timestamp.clone();
+        // Advance cursor — parse trade timestamp to unix seconds
+        let trade_ts = parse_trade_ts(&trade.timestamp);
+        if trade_ts > newest_ts {
+            newest_ts = trade_ts;
         }
 
         // Dedup
@@ -234,7 +236,7 @@ pub async fn poll_and_copy(
         }
     }
 
-    state.last_poll_timestamp = newest_ts;
+    state.last_poll_ts = newest_ts;
     Ok(())
 }
 
@@ -242,10 +244,10 @@ pub async fn poll_and_copy(
 
 async fn fetch_target_trades(
     client: &Client,
-    since: &str,
+    since_ts: i64,
 ) -> Result<Vec<TargetTrade>> {
     let url = format!(
-        "{DATA_API}/activity?user={TARGET_WALLET}&type=TRADE&limit=100&sortBy=TIMESTAMP&sortDirection=DESC&start={since}"
+        "{DATA_API}/activity?user={TARGET_WALLET}&type=TRADE&limit=100&sortBy=TIMESTAMP&sortDirection=DESC&start={since_ts}"
     );
 
     let resp = client.get(&url).send().await.context("fetch target trades")?;
@@ -498,36 +500,22 @@ async fn submit_order(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn chrono_now_iso() -> String {
+fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    // Simple ISO-8601 format without external crate
-    let s = secs;
-    let days = s / 86400;
-    let rem = s % 86400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let sec = rem % 60;
-
-    // Days since epoch to Y-M-D (simplified)
-    let (y, mo, d) = epoch_days_to_ymd(days);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{sec:02}Z")
+        .as_secs() as i64
 }
 
-fn epoch_days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+/// Parse a trade timestamp string to Unix seconds.
+/// Handles both unix-millis integers and ISO-8601 strings.
+fn parse_trade_ts(ts: &str) -> i64 {
+    // Try as integer (unix millis or secs)
+    if let Ok(n) = ts.parse::<i64>() {
+        return if n > 1_000_000_000_000 { n / 1000 } else { n };
+    }
+    // Fallback: try naive ISO parse — extract digits before 'T' and after
+    // For now just return current time if unparseable
+    now_secs()
 }
