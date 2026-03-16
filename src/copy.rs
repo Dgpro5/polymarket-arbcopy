@@ -444,7 +444,7 @@ async fn build_order(
             nonce: "0".to_string(),
             fee_rate_bps: fee_bps.to_string(),
             signature,
-            signature_type: 1, // POLY_PROXY
+            signature_type: 2, // POLY_GNOSIS_SAFE
         },
         owner: wallet.creds.api_key.clone(),
         order_type: "FAK".to_string(),
@@ -501,7 +501,7 @@ async fn eip712_order_signature(
             "tokenId": token_id, "makerAmount": maker_amount.to_string(),
             "takerAmount": taker_amount.to_string(), "expiration": expiration.to_string(),
             "nonce": "0", "feeRateBps": fee_bps.to_string(),
-            "side": side, "signatureType": 1u8
+            "side": side, "signatureType": 2u8
         }
     }))?;
 
