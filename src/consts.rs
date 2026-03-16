@@ -4,11 +4,13 @@
 
 pub const CLOB_API: &str = "https://clob.polymarket.com";
 pub const DATA_API: &str = "https://data-api.polymarket.com";
+pub const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 
 // ── Blockchain (Polygon, chain 137) ─────────────────────────────────────────
 
 pub const CHAIN_ID: u64 = 137;
 pub const CTF_EXCHANGE_ADDRESS: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+pub const NEG_RISK_CTF_EXCHANGE_ADDRESS: &str = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
 pub const CONDITIONAL_TOKENS_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 pub const USDC_E_POLYGON: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -20,7 +22,7 @@ pub const TARGET_WALLET: &str = "0x571c285a83eba5322b5f916ba681669dc368a61f";
 // ── Copy trading parameters ─────────────────────────────────────────────────
 
 /// How often to poll the data API for new trades (seconds).
-pub const POLL_INTERVAL_SECS: u64 = 10;
+pub const POLL_INTERVAL_SECS: u64 = 1;
 
 /// Fraction of the target's USD notional to copy.
 /// Example: target spends $27.62 → we spend $27.62 * 0.0724 ≈ $2.00.
