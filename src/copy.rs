@@ -13,7 +13,7 @@ use crate::alerts;
 use crate::auth::{self, TradingWallet};
 use crate::consts::{
     CHAIN_ID, CLOB_API, COPY_FRACTION, CTF_EXCHANGE_ADDRESS, DATA_API, GAMMA_API, MIN_COPY_USD,
-    NEG_RISK_CTF_EXCHANGE_ADDRESS, TARGET_WALLET, ZERO_ADDRESS,
+    TARGET_WALLET, ZERO_ADDRESS,
 };
 use crate::redeem;
 
@@ -73,8 +73,6 @@ pub struct CopyState {
     /// Unix timestamp (seconds) — only fetch trades newer than this.
     pub last_poll_ts: i64,
     pub copied_trade_ids: HashSet<String>,
-    /// Cache: token_id → neg_risk bool (avoids repeated Gamma API lookups).
-    pub neg_risk_cache: HashMap<String, bool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -118,7 +116,6 @@ pub fn new_copy_state(max_session_notional: f64) -> CopyState {
         session_notional: 0.0,
         max_session_notional,
         last_poll_ts: now,
-        neg_risk_cache: HashMap::new(),
         copied_trade_ids: HashSet::new(),
     }
 }
@@ -175,8 +172,7 @@ pub async fn poll_and_copy(
             target_notional
         );
 
-        let neg_risk = is_neg_risk(client, &trade.token_id, &mut state.neg_risk_cache).await;
-        match execute_copy_trade(client, wallet, trade, copy_shares, copy_usd, neg_risk).await {
+        match execute_copy_trade(client, wallet, trade, copy_shares, copy_usd).await {
             Ok(fill) => {
                 state.copied_trade_ids.insert(trade.transaction_hash.clone());
                 state.session_notional += fill.filled_usd;
@@ -274,11 +270,10 @@ async fn execute_copy_trade(
     trade: &TargetTrade,
     copy_shares: f64,
     _copy_usd: f64,
-    neg_risk: bool,
 ) -> Result<FillInfo> {
     let fee_bps = get_fee_rate(client, &trade.token_id).await.unwrap_or(1000);
 
-    let order = build_order(wallet, &trade.token_id, copy_shares, trade.price, &trade.side, fee_bps, neg_risk).await?;
+    let order = build_order(wallet, &trade.token_id, copy_shares, trade.price, &trade.side, fee_bps).await?;
 
     let result = submit_order(client, wallet, order).await?;
 
@@ -332,31 +327,6 @@ async fn execute_copy_trade(
     })
 }
 
-/// Check if a market is neg-risk via the Gamma API.
-async fn is_neg_risk(
-    client: &Client,
-    token_id: &str,
-    cache: &mut HashMap<String, bool>,
-) -> bool {
-    if let Some(&cached) = cache.get(token_id) {
-        return cached;
-    }
-    let result = async {
-        let url = format!("{GAMMA_API}/markets?clob_token_ids={token_id}");
-        let resp: Vec<Value> = client.get(&url).send().await?.json().await?;
-        let neg = resp
-            .first()
-            .and_then(|m| m.get("neg_risk"))
-            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
-            .unwrap_or(false);
-        Ok::<bool, anyhow::Error>(neg)
-    }
-    .await
-    .unwrap_or(false);
-    cache.insert(token_id.to_string(), result);
-    result
-}
-
 async fn get_fee_rate(client: &Client, token_id: &str) -> Result<u64> {
     let url = format!("{CLOB_API}/fee-rate?token_id={token_id}");
     let resp: Value = client.get(&url).send().await?.json().await?;
@@ -379,21 +349,19 @@ async fn build_order(
     price: f64,
     side: &str,
     fee_bps: u64,
-    neg_risk: bool,
 ) -> Result<CreateOrderRequest> {
     let side_uint: u8 = if side == "BUY" { 0 } else { 1 };
 
-    // Polymarket precision: USDC amounts → 2 decimal places, share amounts → 4 decimal places.
-    // In raw 6-decimal units: USDC rounds to nearest 10000, shares rounds to nearest 100.
+    // Amounts use 6 decimal places (same as USDC).
+    // BUY: makerAmount = USDC to spend, takerAmount = tokens to receive.
+    // SELL: makerAmount = tokens to give, takerAmount = USDC to receive.
     let (maker_amount, taker_amount) = if side_uint == 0 {
-        // BUY: we pay USDC (maker), receive shares (taker)
-        let maker = ((price * shares * 100.0).floor() as u128) * 10_000; // 2 decimals
-        let taker = ((shares * 10_000.0).floor() as u128) * 100;         // 4 decimals
+        let maker = (price * shares * 1_000_000.0).round() as u128;
+        let taker = (shares * 1_000_000.0).round() as u128;
         (maker, taker)
     } else {
-        // SELL: we give shares (maker), receive USDC (taker)
-        let maker = ((shares * 10_000.0).floor() as u128) * 100;         // 4 decimals
-        let taker = ((price * shares * 100.0).floor() as u128) * 10_000; // 2 decimals
+        let maker = (shares * 1_000_000.0).round() as u128;
+        let taker = (price * shares * 1_000_000.0).round() as u128;
         (maker, taker)
     };
 
@@ -409,16 +377,9 @@ async fn build_order(
     getrandom::getrandom(&mut salt_bytes).map_err(|e| anyhow!("RNG: {e}"))?;
     let salt = u64::from_le_bytes(salt_bytes);
 
-    let exchange_addr = if neg_risk {
-        NEG_RISK_CTF_EXCHANGE_ADDRESS
-    } else {
-        CTF_EXCHANGE_ADDRESS
-    };
-
     let signature = eip712_order_signature(
         &wallet.wallet,
         wallet.address,
-        wallet.proxy_address,
         token_id,
         maker_amount,
         taker_amount,
@@ -426,14 +387,13 @@ async fn build_order(
         salt,
         fee_bps,
         0, // expiration: 0 for FAK
-        exchange_addr,
     )
     .await?;
 
     Ok(CreateOrderRequest {
         order: PolymarketOrderStruct {
             salt,
-            maker: format!("{:#x}", wallet.proxy_address),
+            maker: format!("{:#x}", wallet.address),
             signer: format!("{:#x}", wallet.address),
             taker: ZERO_ADDRESS.to_string(),
             token_id: token_id.to_string(),
@@ -454,8 +414,7 @@ async fn build_order(
 
 async fn eip712_order_signature(
     wallet: &LocalWallet,
-    signer_address: Address,
-    proxy_address: Address,
+    address: Address,
     token_id: &str,
     maker_amount: u128,
     taker_amount: u128,
@@ -463,7 +422,6 @@ async fn eip712_order_signature(
     salt: u64,
     fee_bps: u64,
     expiration: u64,
-    exchange_address: &str,
 ) -> Result<String> {
     use ethers::types::transaction::eip712::TypedData;
 
@@ -471,7 +429,7 @@ async fn eip712_order_signature(
         "primaryType": "Order",
         "domain": {
             "name": "Polymarket CTF Exchange", "version": "1",
-            "chainId": CHAIN_ID, "verifyingContract": exchange_address
+            "chainId": CHAIN_ID, "verifyingContract": CTF_EXCHANGE_ADDRESS
         },
         "types": {
             "EIP712Domain": [
@@ -496,8 +454,8 @@ async fn eip712_order_signature(
             ]
         },
         "message": {
-            "salt": salt.to_string(), "maker": format!("{:#x}", proxy_address),
-            "signer": format!("{:#x}", signer_address), "taker": ZERO_ADDRESS,
+            "salt": salt.to_string(), "maker": format!("{:#x}", address),
+            "signer": format!("{:#x}", address), "taker": ZERO_ADDRESS,
             "tokenId": token_id, "makerAmount": maker_amount.to_string(),
             "takerAmount": taker_amount.to_string(), "expiration": expiration.to_string(),
             "nonce": "0", "feeRateBps": fee_bps.to_string(),
