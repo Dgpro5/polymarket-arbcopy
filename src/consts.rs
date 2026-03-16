@@ -46,6 +46,17 @@ pub const BALANCE_CHECK_INTERVAL_SECS: u64 = 300;
 
 pub const ANKR_API_KEY_ENV: &str = "ANKR_API_KEY";
 
+// ── Redemption & trade history ──────────────────────────────────────────────
+
+/// Wait this long after a trade before checking outcome / redeeming (seconds).
+pub const REDEMPTION_DELAY_SECS: u64 = 900; // 15 minutes
+/// How often the redemption loop checks for ripe entries (seconds).
+pub const REDEMPTION_POLL_INTERVAL_SECS: u64 = 60;
+/// JSON file for the redemption queue.
+pub const PENDING_REDEMPTIONS_FILE: &str = "data/pending_redemptions.json";
+/// JSON file for completed trade history (WIN/LOSS log).
+pub const TRADE_HISTORY_FILE: &str = "data/trade_history.json";
+
 // ── Discord webhooks ────────────────────────────────────────────────────────
 
 pub const DISCORD_WEBHOOK_URL: &str =

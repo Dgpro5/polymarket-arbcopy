@@ -1,11 +1,18 @@
-// On-chain helpers — USDC.e balance check and token approvals.
+// On-chain helpers — USDC.e balance, approvals, OpenOcean swaps, CTF redemption.
 
+use alloy::providers::ProviderBuilder;
+use alloy::signers::Signer as _;
+use alloy::signers::local::LocalSigner;
 use anyhow::{Context, Result, anyhow};
 use ethers::prelude::*;
 use ethers::signers::Signer;
+use polymarket_client_sdk::POLYGON;
+use polymarket_client_sdk::ctf::{Client as CtfClient, types::RedeemPositionsRequest};
+use polymarket_client_sdk::types::{Address as AlloyAddress, B256, U256 as AlloyU256};
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::env;
+use std::str::FromStr;
 use std::time::Duration;
 
 use crate::auth::TradingWallet;
@@ -59,6 +66,35 @@ pub async fn ensure_approvals(client: &Client, wallet: &TradingWallet) -> Result
     ensure_ctf_token_approval(client, wallet)
         .await
         .context("ERC-1155 approval")?;
+    Ok(())
+}
+
+/// Redeem CTF positions for a given condition_id.
+/// Returns Ok(()) on success, Err on failure.
+pub async fn redeem_single(private_key: &str, condition_id_hex: &str) -> Result<()> {
+    let rpc_url = ankr_rpc()?;
+
+    let signer = LocalSigner::from_str(private_key.trim())
+        .context("parse key for redeem")?
+        .with_chain_id(Some(POLYGON));
+
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect(&rpc_url)
+        .await
+        .context("connect provider")?;
+
+    let ctf = CtfClient::new(provider, POLYGON).context("init ctf")?;
+
+    let collateral: AlloyAddress = USDC_E_POLYGON.parse()?;
+    let cid: B256 = condition_id_hex.parse()?;
+
+    let mut req = RedeemPositionsRequest::for_binary_market(collateral, cid);
+    req.index_sets = vec![AlloyU256::from(1), AlloyU256::from(2)];
+
+    ctf.redeem_positions(&req)
+        .await
+        .with_context(|| format!("redeem {cid:#x}"))?;
     Ok(())
 }
 

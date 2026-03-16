@@ -15,6 +15,7 @@ use crate::consts::{
     CHAIN_ID, CLOB_API, COPY_FRACTION, CTF_EXCHANGE_ADDRESS, DATA_API, TARGET_WALLET,
     ZERO_ADDRESS,
 };
+use crate::redeem;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,17 @@ pub struct Position {
     pub token_id: String,
     pub shares: f64,
     pub notional: f64,
+}
+
+/// Actual fill info returned by the CLOB after order execution.
+pub struct FillInfo {
+    pub order_id: String,
+    /// Actual shares received (for BUY) or sold (for SELL).
+    pub filled_shares: f64,
+    /// Actual USDC paid (for BUY) or received (for SELL).
+    pub filled_usd: f64,
+    /// Price per share (filled_usd / filled_shares).
+    pub fill_price: f64,
 }
 
 pub struct CopyState {
@@ -160,9 +172,9 @@ pub async fn poll_and_copy(
         );
 
         match execute_copy_trade(client, wallet, trade, copy_shares, copy_usd).await {
-            Ok(order_id) => {
+            Ok(fill) => {
                 state.copied_trade_ids.insert(trade.id.clone());
-                state.session_notional += copy_usd;
+                state.session_notional += fill.filled_usd;
 
                 let pos = state
                     .positions
@@ -174,25 +186,38 @@ pub async fn poll_and_copy(
                     });
 
                 if trade.side == "BUY" {
-                    pos.shares += copy_shares;
-                    pos.notional += copy_usd;
+                    pos.shares += fill.filled_shares;
+                    pos.notional += fill.filled_usd;
                 } else {
-                    pos.shares -= copy_shares;
-                    pos.notional -= copy_usd;
+                    pos.shares -= fill.filled_shares;
+                    pos.notional -= fill.filled_usd;
                 }
+
+                // Record for redemption queue (15-min wait, then redeem)
+                redeem::record_pending(
+                    &trade.condition_id,
+                    &trade.market,
+                    &trade.side,
+                    fill.filled_shares,
+                    fill.fill_price,
+                    &trade.token_id,
+                );
 
                 alerts::send_copy_success(
                     client,
                     &trade.side,
                     &trade.market,
-                    trade.price,
-                    copy_shares,
-                    copy_usd,
-                    &order_id,
+                    fill.fill_price,
+                    fill.filled_shares,
+                    fill.filled_usd,
+                    &fill.order_id,
                 )
                 .await;
 
-                eprintln!("  -> Order placed: {order_id}");
+                eprintln!(
+                    "  -> Filled: {} shares @ {:.4} (${:.2}) | Order: {}",
+                    fill.filled_shares, fill.fill_price, fill.filled_usd, fill.order_id
+                );
             }
             Err(e) => {
                 let err_msg = format!("{e:#}");
@@ -244,7 +269,7 @@ async fn execute_copy_trade(
     trade: &TargetTrade,
     copy_shares: f64,
     _copy_usd: f64,
-) -> Result<String> {
+) -> Result<FillInfo> {
     let fee_bps = get_fee_rate(client, &trade.token_id).await.unwrap_or(1000);
 
     let order = build_order(wallet, &trade.token_id, copy_shares, trade.price, &trade.side, fee_bps).await?;
@@ -253,7 +278,6 @@ async fn execute_copy_trade(
 
     let order_id = result
         .get("orderID")
-        .or_else(|| result.get("orderID"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
@@ -266,7 +290,40 @@ async fn execute_copy_trade(
         return Err(anyhow!("Order rejected: {err}"));
     }
 
-    Ok(order_id)
+    // Parse actual fill amounts from the response.
+    // For BUY: takingAmount = shares received, makingAmount = USDC paid
+    // For SELL: takingAmount = USDC received, makingAmount = shares sold
+    let taking = result
+        .get("takingAmount")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        / 1_000_000.0;
+    let making = result
+        .get("makingAmount")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        / 1_000_000.0;
+
+    let (filled_shares, filled_usd) = if trade.side == "BUY" {
+        (taking, making) // taking = shares, making = USDC paid
+    } else {
+        (making, taking) // making = shares sold, taking = USDC received
+    };
+
+    let fill_price = if filled_shares > 0.0 {
+        filled_usd / filled_shares
+    } else {
+        trade.price
+    };
+
+    Ok(FillInfo {
+        order_id,
+        filled_shares,
+        filled_usd,
+        fill_price,
+    })
 }
 
 async fn get_fee_rate(client: &Client, token_id: &str) -> Result<u64> {

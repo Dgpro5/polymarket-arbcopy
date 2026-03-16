@@ -4,6 +4,7 @@ mod chain;
 mod consts;
 mod copy;
 mod encrypt;
+mod redeem;
 
 use anyhow::Result;
 use std::fs;
@@ -53,7 +54,13 @@ async fn main() -> Result<()> {
 
     alerts::send_startup(&client, balance, max_session).await;
 
-    // 8. Spawn background balance check every 5 minutes
+    // 8. Spawn background redemption loop (checks every 60s, redeems after 15 min)
+    let redeem_key = private_key.clone();
+    tokio::spawn(async move {
+        redeem::run_redemption_loop(redeem_key).await;
+    });
+
+    // 9. Spawn background balance check every 5 minutes
     let balance_wallet = Arc::clone(&wallet);
     tokio::spawn(async move {
         let client = reqwest::Client::new();
@@ -71,7 +78,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 9. Main polling loop
+    // 10. Main polling loop
     let mut interval = tokio::time::interval(Duration::from_secs(consts::POLL_INTERVAL_SECS));
 
     loop {
