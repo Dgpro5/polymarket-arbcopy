@@ -206,17 +206,29 @@ async fn get_proxy_wallet(
         .await
         .context("fetch proxy wallet")?;
 
-    let body: Value = resp.json().await.context("parse proxy wallet response")?;
+    let raw = resp.text().await.context("read proxy wallet response")?;
 
-    let proxy_str = body
-        .get("address")
-        .or_else(|| body.get("proxyAddress"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("no proxy wallet in response: {body}"))?;
+    // The endpoint may return a JSON object {"address": "0x..."} or a plain quoted string "0x..."
+    let proxy_str = if let Ok(body) = serde_json::from_str::<Value>(&raw) {
+        if let Some(s) = body.as_str() {
+            // Plain JSON string: "0x..."
+            s.to_string()
+        } else {
+            // JSON object: {"address": "0x..."}
+            body.get("address")
+                .or_else(|| body.get("proxyAddress"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("no proxy wallet in response: {raw}"))?
+                .to_string()
+        }
+    } else {
+        // Plain text (unquoted)
+        raw.trim().to_string()
+    };
 
     proxy_str
         .parse::<Address>()
-        .context("parse proxy wallet address")
+        .context(format!("parse proxy wallet address from: {raw}"))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
