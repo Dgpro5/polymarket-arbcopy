@@ -518,6 +518,7 @@ async fn submit_order(
     order: CreateOrderRequest,
 ) -> Result<Value> {
     let body = serde_json::to_string(&order)?;
+    eprintln!("DEBUG order payload: {body}");
     let ts = auth::now_secs();
     let sig = auth::l2_signature(&wallet.creds.secret, ts, "POST", "/order", &body)?;
 
