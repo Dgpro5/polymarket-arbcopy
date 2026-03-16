@@ -70,19 +70,9 @@ pub async fn ensure_approvals(client: &Client, wallet: &TradingWallet) -> Result
 }
 
 /// Redeem CTF positions for a given condition_id.
-/// Returns Ok(usdc_gained) — the USDC difference from the redemption.
-/// A positive value means a win; zero or near-zero means a loss.
-pub async fn redeem_single(private_key: &str, condition_id_hex: &str) -> Result<f64> {
+/// Returns Ok(()) on success, Err on failure.
+pub async fn redeem_single(private_key: &str, condition_id_hex: &str) -> Result<()> {
     let rpc_url = ankr_rpc()?;
-
-    let http_client = Client::new();
-
-    // Derive EOA address from private key for balance check
-    let ethers_wallet: ethers::signers::LocalWallet = private_key.trim().parse()
-        .context("parse key for balance check")?;
-    let eoa_address = ethers_wallet.address();
-
-    let balance_before = get_balance(&http_client, &eoa_address).await.unwrap_or(0.0);
 
     let signer = LocalSigner::from_str(private_key.trim())
         .context("parse key for redeem")?
@@ -105,13 +95,7 @@ pub async fn redeem_single(private_key: &str, condition_id_hex: &str) -> Result<
     ctf.redeem_positions(&req)
         .await
         .with_context(|| format!("redeem {cid:#x}"))?;
-
-    // Small delay for balance to reflect on-chain
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let balance_after = get_balance(&http_client, &eoa_address).await.unwrap_or(balance_before);
-    let gained = balance_after - balance_before;
-
-    Ok(gained)
+    Ok(())
 }
 
 /// Get POL (native token) balance for an address.
