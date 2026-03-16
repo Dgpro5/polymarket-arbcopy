@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::URL_SAFE as BASE64};
 use ethers::prelude::*;
 use ethers::signers::{LocalWallet, Signer};
+use ethers::utils::keccak256;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -43,8 +44,8 @@ pub async fn setup_wallet(private_key: &str) -> Result<Arc<TradingWallet>> {
     eprintln!("Wallet: {:#x}", address);
 
     let creds = get_or_create_api_creds(&wallet_signer, address, &client).await?;
-    let proxy_address = get_proxy_wallet(&client, address, &creds).await?;
-    eprintln!("Proxy wallet: {:#x}", proxy_address);
+    let proxy_address = derive_safe_wallet(address);
+    eprintln!("Proxy wallet (Safe): {:#x}", proxy_address);
 
     Ok(Arc::new(TradingWallet {
         wallet: wallet_signer,
@@ -184,51 +185,33 @@ async fn get_or_create_api_creds(
     })
 }
 
-// ── Proxy wallet lookup ──────────────────────────────────────────────────────
+// ── Proxy wallet derivation (Gnosis Safe via CREATE2) ────────────────────────
 
-async fn get_proxy_wallet(
-    client: &Client,
-    address: Address,
-    creds: &ApiCredentials,
-) -> Result<Address> {
-    let ts = now_secs();
-    let sig = l2_signature(&creds.secret, ts, "GET", "/proxy-wallet-address", "")?;
-    let addr_str = format!("{:#x}", address);
+/// Derives the Gnosis Safe wallet address for a browser-wallet user on Polygon.
+/// Uses the same CREATE2 formula as the Polymarket SDK.
+fn derive_safe_wallet(eoa: Address) -> Address {
+    // Polygon Safe factory
+    const SAFE_FACTORY: &str = "aacFeEa03eb1561C4e67d661e40682Bd20E3541b";
+    // Safe init code hash (from Polymarket SDK)
+    let safe_init_code_hash = hex::decode(
+        "2bce2127ff07fb632d16c8347c4ebf501f4841168bed00d9e6ef715ddb6fcecf"
+    ).expect("valid hex");
 
-    let resp = client
-        .get(format!("{CLOB_API}/proxy-wallet-address"))
-        .header("POLY_ADDRESS", &addr_str)
-        .header("POLY_SIGNATURE", &sig)
-        .header("POLY_TIMESTAMP", ts.to_string())
-        .header("POLY_API_KEY", &creds.api_key)
-        .header("POLY_PASSPHRASE", &creds.passphrase)
-        .send()
-        .await
-        .context("fetch proxy wallet")?;
+    let factory: Address = SAFE_FACTORY.parse().expect("safe factory address");
 
-    let raw = resp.text().await.context("read proxy wallet response")?;
+    // Salt = keccak256(abi.encode(address)) — address left-padded to 32 bytes
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(eoa.as_bytes());
+    let salt = keccak256(padded);
 
-    // The endpoint may return a JSON object {"address": "0x..."} or a plain quoted string "0x..."
-    let proxy_str = if let Ok(body) = serde_json::from_str::<Value>(&raw) {
-        if let Some(s) = body.as_str() {
-            // Plain JSON string: "0x..."
-            s.to_string()
-        } else {
-            // JSON object: {"address": "0x..."}
-            body.get("address")
-                .or_else(|| body.get("proxyAddress"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("no proxy wallet in response: {raw}"))?
-                .to_string()
-        }
-    } else {
-        // Plain text (unquoted)
-        raw.trim().to_string()
-    };
-
-    proxy_str
-        .parse::<Address>()
-        .context(format!("parse proxy wallet address from: {raw}"))
+    // CREATE2: keccak256(0xff ++ factory ++ salt ++ init_code_hash)[12..]
+    let mut data = Vec::with_capacity(1 + 20 + 32 + 32);
+    data.push(0xff);
+    data.extend_from_slice(factory.as_bytes());
+    data.extend_from_slice(&salt);
+    data.extend_from_slice(&safe_init_code_hash);
+    let hash = keccak256(&data);
+    Address::from_slice(&hash[12..])
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
