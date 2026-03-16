@@ -207,12 +207,21 @@ pub async fn run_redemption_loop(private_key: String) {
             );
 
             match chain::redeem_single(&private_key, &entry.condition_id).await {
-                Ok(_) => {
-                    // WIN — position redeemed successfully
-                    eprintln!("WIN: {} — redeemed successfully", entry.market);
+                Ok(usdc_gained) => {
+                    // Check actual USDC gained to determine win vs loss.
+                    // Winning positions pay out ~shares USDC; losing ones pay ~$0.
+                    let cost = entry.filled_shares * entry.fill_price;
+                    let is_win = usdc_gained > 0.01; // >1 cent means something was redeemed
+                    let outcome = if is_win { "WIN" } else { "LOSS" };
+                    let pnl = if is_win { usdc_gained - cost } else { -cost };
+
+                    eprintln!(
+                        "{}: {} — redeemed ${:.2} (cost ${:.2}, PnL ${:.2})",
+                        outcome, entry.market, usdc_gained, cost, pnl
+                    );
                     append_history(TradeHistoryEntry {
                         market: entry.market.clone(),
-                        outcome: "WIN".to_string(),
+                        outcome: outcome.to_string(),
                         filled_shares: entry.filled_shares,
                         fill_price: entry.fill_price,
                         side: entry.side.clone(),
@@ -224,17 +233,12 @@ pub async fn run_redemption_loop(private_key: String) {
                     let msg = format!("{e:#}");
 
                     if msg.contains("revert") || msg.contains("insufficient") {
-                        // LOSS — position is worthless (revert = nothing to redeem)
-                        eprintln!("LOSS: {} — {}", entry.market, msg);
-                        append_history(TradeHistoryEntry {
-                            market: entry.market.clone(),
-                            outcome: "LOSS".to_string(),
-                            filled_shares: entry.filled_shares,
-                            fill_price: entry.fill_price,
-                            side: entry.side.clone(),
-                            trade_ts: entry.trade_ts,
-                            resolved_ts: now,
-                        });
+                        // Revert likely means market not yet resolved — retry later
+                        eprintln!(
+                            "Redeem REVERTED for {} (attempt #{}, retrying later): {}",
+                            entry.market, entry.attempts, msg
+                        );
+                        retry_later.push(entry);
                     } else {
                         // Transient error — move to back of queue for retry
                         eprintln!(
