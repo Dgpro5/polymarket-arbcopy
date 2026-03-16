@@ -12,8 +12,8 @@ use std::sync::Arc;
 use crate::alerts;
 use crate::auth::{self, TradingWallet};
 use crate::consts::{
-    CHAIN_ID, CLOB_API, COPY_FRACTION, CTF_EXCHANGE_ADDRESS, DATA_API, TARGET_WALLET,
-    ZERO_ADDRESS,
+    CHAIN_ID, CLOB_API, COPY_FRACTION, CTF_EXCHANGE_ADDRESS, DATA_API, MIN_COPY_USD,
+    TARGET_WALLET, ZERO_ADDRESS,
 };
 use crate::redeem;
 
@@ -146,17 +146,9 @@ pub async fn poll_and_copy(
             continue;
         }
 
-        // Sizing
+        // Sizing: use 7.24% of target notional, but at least $2.00
         let target_notional = trade.size * trade.price;
-        let copy_usd = target_notional * COPY_FRACTION;
-        if copy_usd < 0.50 {
-            eprintln!(
-                "Skip trade {} — copy size ${:.2} too small (target ${:.2})",
-                trade.transaction_hash, copy_usd, target_notional
-            );
-            state.copied_trade_ids.insert(trade.transaction_hash.clone());
-            continue;
-        }
+        let copy_usd = (target_notional * COPY_FRACTION).max(MIN_COPY_USD);
 
         // Risk check
         if state.session_notional + copy_usd > state.max_session_notional {
@@ -360,15 +352,17 @@ async fn build_order(
 ) -> Result<CreateOrderRequest> {
     let side_uint: u8 = if side == "BUY" { 0 } else { 1 };
 
+    // Polymarket precision: USDC amounts → 2 decimal places, share amounts → 4 decimal places.
+    // In raw 6-decimal units: USDC rounds to nearest 10000, shares rounds to nearest 100.
     let (maker_amount, taker_amount) = if side_uint == 0 {
         // BUY: we pay USDC (maker), receive shares (taker)
-        let maker = (price * shares * 1_000_000.0).round() as u128;
-        let taker = (shares * 1_000_000.0).round() as u128;
+        let maker = ((price * shares * 100.0).floor() as u128) * 10_000; // 2 decimals
+        let taker = ((shares * 10_000.0).floor() as u128) * 100;         // 4 decimals
         (maker, taker)
     } else {
         // SELL: we give shares (maker), receive USDC (taker)
-        let maker = (shares * 1_000_000.0).round() as u128;
-        let taker = (price * shares * 1_000_000.0).round() as u128;
+        let maker = ((shares * 10_000.0).floor() as u128) * 100;         // 4 decimals
+        let taker = ((price * shares * 100.0).floor() as u128) * 10_000; // 2 decimals
         (maker, taker)
     };
 
