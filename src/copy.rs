@@ -22,22 +22,29 @@ use crate::redeem;
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct TargetTrade {
-    pub id: String,
     #[serde(rename = "conditionId", default)]
     pub condition_id: String,
-    #[serde(rename = "proxyWalletAddress", default)]
+    #[serde(rename = "transactionHash", default)]
+    pub transaction_hash: String,
+    #[serde(rename = "proxyWallet", default)]
     pub proxy_wallet: String,
     #[serde(rename = "asset", default)]
     pub token_id: String,
     pub side: String,
     pub price: f64,
     pub size: f64,
-    #[serde(rename = "createdAt", default)]
-    pub timestamp: String,
-    #[serde(rename = "title", default)]
-    pub market: String,
+    #[serde(default)]
+    pub timestamp: f64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(rename = "outcome", default)]
+    pub outcome: String,
     #[serde(rename = "usdcSize", default)]
     pub usdc_size: f64,
+    #[serde(rename = "outcomeIndex", default)]
+    pub outcome_index: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -128,14 +135,14 @@ pub async fn poll_and_copy(
     let mut newest_ts = state.last_poll_ts;
 
     for trade in &trades {
-        // Advance cursor — parse trade timestamp to unix seconds
-        let trade_ts = parse_trade_ts(&trade.timestamp);
+        // Advance cursor — timestamp is unix seconds (f64)
+        let trade_ts = trade.timestamp as i64;
         if trade_ts > newest_ts {
             newest_ts = trade_ts;
         }
 
         // Dedup
-        if state.copied_trade_ids.contains(&trade.id) {
+        if state.copied_trade_ids.contains(&trade.transaction_hash) {
             continue;
         }
 
@@ -145,9 +152,9 @@ pub async fn poll_and_copy(
         if copy_usd < 0.50 {
             eprintln!(
                 "Skip trade {} — copy size ${:.2} too small (target ${:.2})",
-                trade.id, copy_usd, target_notional
+                trade.transaction_hash, copy_usd, target_notional
             );
-            state.copied_trade_ids.insert(trade.id.clone());
+            state.copied_trade_ids.insert(trade.transaction_hash.clone());
             continue;
         }
 
@@ -155,7 +162,7 @@ pub async fn poll_and_copy(
         if state.session_notional + copy_usd > state.max_session_notional {
             eprintln!(
                 "Skip trade {} — session limit reached (${:.2} + ${:.2} > ${:.2})",
-                trade.id, state.session_notional, copy_usd, state.max_session_notional
+                trade.transaction_hash, state.session_notional, copy_usd, state.max_session_notional
             );
             continue;
         }
@@ -165,7 +172,7 @@ pub async fn poll_and_copy(
         eprintln!(
             "Copying trade: {} {} {:.2} shares @ {:.4} (${:.2}) | target: {:.2} shares (${:.2})",
             trade.side,
-            &trade.market,
+            &trade.title,
             copy_shares,
             trade.price,
             copy_usd,
@@ -175,7 +182,7 @@ pub async fn poll_and_copy(
 
         match execute_copy_trade(client, wallet, trade, copy_shares, copy_usd).await {
             Ok(fill) => {
-                state.copied_trade_ids.insert(trade.id.clone());
+                state.copied_trade_ids.insert(trade.transaction_hash.clone());
                 state.session_notional += fill.filled_usd;
 
                 let pos = state
@@ -198,7 +205,7 @@ pub async fn poll_and_copy(
                 // Record for redemption queue (15-min wait, then redeem)
                 redeem::record_pending(
                     &trade.condition_id,
-                    &trade.market,
+                    &trade.title,
                     &trade.side,
                     fill.filled_shares,
                     fill.fill_price,
@@ -208,7 +215,7 @@ pub async fn poll_and_copy(
                 alerts::send_copy_success(
                     client,
                     &trade.side,
-                    &trade.market,
+                    &trade.title,
                     fill.fill_price,
                     fill.filled_shares,
                     fill.filled_usd,
@@ -225,13 +232,13 @@ pub async fn poll_and_copy(
                 let err_msg = format!("{e:#}");
                 alerts::send_copy_error(
                     client,
-                    &format!("{} {} @ {:.4}", trade.side, trade.market, trade.price),
+                    &format!("{} {} @ {:.4}", trade.side, trade.title, trade.price),
                     &err_msg,
                 )
                 .await;
                 eprintln!("  -> Failed: {err_msg}");
                 // Mark as copied to avoid retrying the same failing trade
-                state.copied_trade_ids.insert(trade.id.clone());
+                state.copied_trade_ids.insert(trade.transaction_hash.clone());
             }
         }
     }
@@ -508,14 +515,3 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-/// Parse a trade timestamp string to Unix seconds.
-/// Handles both unix-millis integers and ISO-8601 strings.
-fn parse_trade_ts(ts: &str) -> i64 {
-    // Try as integer (unix millis or secs)
-    if let Ok(n) = ts.parse::<i64>() {
-        return if n > 1_000_000_000_000 { n / 1000 } else { n };
-    }
-    // Fallback: try naive ISO parse — extract digits before 'T' and after
-    // For now just return current time if unparseable
-    now_secs()
-}
