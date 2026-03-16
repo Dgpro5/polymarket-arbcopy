@@ -29,6 +29,19 @@ pub const COPY_FRACTION: f64 = 0.0724;
 /// Maximum fraction of USDC.e balance to deploy in a session.
 pub const MAX_BALANCE_FRACTION: f64 = 0.80;
 
+// ── Balance management ──────────────────────────────────────────────────────
+
+/// Minimum USDC.e balance — if below this, swap POL → USDC.e.
+pub const MIN_USDC_BALANCE: f64 = 25.0;
+/// How much USDC.e to acquire when below threshold.
+pub const USDC_TOP_UP_AMOUNT: f64 = 25.0;
+/// Minimum POL balance (token count, not dollars) — if below, swap USDC.e → POL.
+pub const MIN_POL_BALANCE: f64 = 50.0;
+/// How much USDC.e to swap into POL when POL is low.
+pub const POL_TOP_UP_USDC: f64 = 10.0;
+/// How often to run balance checks (seconds).
+pub const BALANCE_CHECK_INTERVAL_SECS: u64 = 300;
+
 // ── Environment variables ───────────────────────────────────────────────────
 
 pub const ANKR_API_KEY_ENV: &str = "ANKR_API_KEY";

@@ -10,8 +10,14 @@ use std::time::Duration;
 
 use crate::auth::TradingWallet;
 use crate::consts::{
-    ANKR_API_KEY_ENV, CHAIN_ID, CONDITIONAL_TOKENS_ADDRESS, CTF_EXCHANGE_ADDRESS, USDC_E_POLYGON,
+    ANKR_API_KEY_ENV, CHAIN_ID, CONDITIONAL_TOKENS_ADDRESS, CTF_EXCHANGE_ADDRESS,
+    MIN_POL_BALANCE, MIN_USDC_BALANCE, POL_TOP_UP_USDC, USDC_E_POLYGON, USDC_TOP_UP_AMOUNT,
 };
+
+/// Native token placeholder used by OpenOcean and other DEX aggregators.
+const NATIVE_TOKEN: &str = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+/// Default slippage percentage for OpenOcean swaps.
+const SWAP_SLIPPAGE: f64 = 3.0;
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -54,6 +60,168 @@ pub async fn ensure_approvals(client: &Client, wallet: &TradingWallet) -> Result
         .await
         .context("ERC-1155 approval")?;
     Ok(())
+}
+
+/// Get POL (native token) balance for an address.
+pub async fn get_pol_balance(client: &Client, address: &Address) -> Result<f64> {
+    let rpc_url = ankr_rpc()?;
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBalance",
+        "params": [format!("{:#x}", address), "latest"],
+        "id": 1
+    });
+    let v: Value = client.post(&rpc_url).json(&body).send().await?.json().await?;
+    if let Some(err) = v.get("error") {
+        return Err(anyhow!("eth_getBalance error: {err}"));
+    }
+    let hex = v["result"]
+        .as_str()
+        .unwrap_or("0x0")
+        .trim_start_matches("0x");
+    Ok(u128::from_str_radix(hex, 16).unwrap_or(0) as f64 / 1e18)
+}
+
+/// Check and rebalance USDC.e and POL:
+/// - If USDC.e < $25, swap POL → USDC.e to get $25.
+/// - If POL < 50, swap $10 USDC.e → POL.
+pub async fn check_and_rebalance(client: &Client, wallet: &TradingWallet) -> Result<()> {
+    let usdc = get_balance(client, &wallet.address).await?;
+    let pol = get_pol_balance(client, &wallet.address).await?;
+
+    eprintln!("Balance check: ${:.2} USDC.e | {:.2} POL", usdc, pol);
+
+    // POL too low → swap USDC.e → POL
+    if pol < MIN_POL_BALANCE {
+        if usdc >= POL_TOP_UP_USDC + 1.0 {
+            eprintln!(
+                "POL low ({pol:.2} < {MIN_POL_BALANCE}) — swapping ${POL_TOP_UP_USDC:.2} USDC.e → POL via OpenOcean…"
+            );
+            match openocean_swap(client, wallet, USDC_E_POLYGON, NATIVE_TOKEN, POL_TOP_UP_USDC, 6).await {
+                Ok(hash) => eprintln!("USDC.e→POL swap confirmed: {hash}"),
+                Err(e) => eprintln!("WARN: USDC.e→POL swap failed: {e:#}"),
+            }
+        } else {
+            eprintln!("WARN: POL low ({pol:.2}) but not enough USDC.e (${usdc:.2}) to top up");
+        }
+    }
+
+    // USDC.e too low → swap POL → USDC.e
+    let usdc = get_balance(client, &wallet.address).await.unwrap_or(usdc);
+    if usdc < MIN_USDC_BALANCE {
+        let pol = get_pol_balance(client, &wallet.address).await.unwrap_or(pol);
+        if pol > MIN_POL_BALANCE {
+            // Estimate how much POL to swap for ~$25 USDC.e
+            // POL is roughly $0.40-0.60, so ~60 POL ≈ $25. Use a generous amount.
+            let swap_pol = (USDC_TOP_UP_AMOUNT * 3.0).min(pol - MIN_POL_BALANCE);
+            if swap_pol > 1.0 {
+                eprintln!(
+                    "USDC.e low (${usdc:.2} < ${MIN_USDC_BALANCE}) — swapping {swap_pol:.2} POL → USDC.e via OpenOcean…"
+                );
+                match openocean_swap(client, wallet, NATIVE_TOKEN, USDC_E_POLYGON, swap_pol, 18).await {
+                    Ok(hash) => eprintln!("POL→USDC.e swap confirmed: {hash}"),
+                    Err(e) => eprintln!("WARN: POL→USDC.e swap failed: {e:#}"),
+                }
+            }
+        } else {
+            eprintln!("WARN: USDC.e low (${usdc:.2}) and POL too low ({pol:.2}) to swap");
+        }
+    }
+
+    Ok(())
+}
+
+// ── OpenOcean DEX swap ──────────────────────────────────────────────────────
+
+/// Execute an on-chain swap via OpenOcean DEX aggregator.
+///
+/// `token_in` / `token_out` are contract addresses (use `NATIVE_TOKEN` for POL).
+/// `amount` is in human units; `decimals` is the token-in decimal count (18 for POL, 6 for USDC.e).
+async fn openocean_swap(
+    client: &Client,
+    wallet: &TradingWallet,
+    token_in: &str,
+    token_out: &str,
+    amount: f64,
+    decimals: u32,
+) -> Result<String> {
+    let rpc_url = ankr_rpc()?;
+    let gas_price = get_gas_price(client, &rpc_url).await?;
+    let account = format!("{:#x}", wallet.address);
+
+    let amount_raw = (amount * 10f64.powi(decimals as i32)) as u128;
+
+    let url = format!(
+        "https://open-api.openocean.finance/v4/polygon/swap?\
+         inTokenAddress={token_in}&outTokenAddress={token_out}\
+         &amountDecimals={amount_raw}&gasPriceDecimals={gas_price}\
+         &slippage={SWAP_SLIPPAGE}&account={account}"
+    );
+
+    let resp: Value = client
+        .get(&url)
+        .send()
+        .await
+        .context("OpenOcean API request failed")?
+        .json()
+        .await
+        .context("OpenOcean returned non-JSON")?;
+
+    if resp.get("code").and_then(|c| c.as_u64()) != Some(200) {
+        let msg = resp.get("error")
+            .or_else(|| resp.get("message"))
+            .unwrap_or(&resp);
+        return Err(anyhow!("OpenOcean error: {msg}"));
+    }
+
+    let data = resp.get("data").ok_or_else(|| anyhow!("OpenOcean: missing 'data' in response"))?;
+    let to_addr = data["to"].as_str().ok_or_else(|| anyhow!("OpenOcean: missing 'to'"))?;
+    let calldata = data["data"].as_str().ok_or_else(|| anyhow!("OpenOcean: missing 'data.data'"))?;
+    let value_str = data["value"].as_str().unwrap_or("0");
+    let est_gas = data["estimatedGas"]
+        .as_u64()
+        .unwrap_or(300_000);
+
+    // ERC-20 tokens need approval for the OpenOcean router before swapping.
+    if token_in != NATIVE_TOKEN {
+        ensure_allowance(client, wallet, to_addr).await
+            .context("OpenOcean: approve token for router")?;
+    }
+
+    let value_wei = if value_str.starts_with("0x") {
+        u128::from_str_radix(value_str.trim_start_matches("0x"), 16).unwrap_or(0)
+    } else {
+        value_str.parse::<u128>().unwrap_or(0)
+    };
+
+    let cd_bytes = hex::decode(calldata.trim_start_matches("0x"))
+        .context("decode OpenOcean calldata")?;
+
+    let nonce = get_nonce(client, &rpc_url, &wallet.address).await?;
+
+    use ethers::types::transaction::eip2718::TypedTransaction;
+    let tx = TypedTransaction::Legacy(ethers::types::TransactionRequest {
+        from: Some(wallet.address),
+        to: Some(to_addr.parse::<Address>().context("parse OpenOcean router")?.into()),
+        nonce: Some(U256::from(nonce)),
+        gas: Some(U256::from((est_gas as f64 * 1.5) as u64)),
+        gas_price: Some(U256::from(gas_price * 2)),
+        data: Some(cd_bytes.into()),
+        value: Some(U256::from(value_wei)),
+        chain_id: Some(U64::from(CHAIN_ID)),
+        ..Default::default()
+    });
+
+    let sig = wallet
+        .wallet
+        .sign_transaction(&tx)
+        .await
+        .map_err(|e| anyhow!("sign OpenOcean swap: {e}"))?;
+    let raw_tx = format!("0x{}", hex::encode(tx.rlp_signed(&sig)));
+
+    let hash = send_raw_tx(client, &rpc_url, &raw_tx).await?;
+    wait_for_receipt(client, &rpc_url, &hash).await?;
+    Ok(hash)
 }
 
 // ── USDC allowance ──────────────────────────────────────────────────────────

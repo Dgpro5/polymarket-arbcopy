@@ -7,6 +7,7 @@ mod encrypt;
 
 use anyhow::Result;
 use std::fs;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
@@ -25,7 +26,10 @@ async fn main() -> Result<()> {
     // 3. Ensure on-chain approvals (USDC + ERC-1155)
     chain::ensure_approvals(&client, &wallet).await?;
 
-    // 4. Check USDC.e balance and compute session limit (80%)
+    // 4. Initial balance check & rebalance (USDC.e ≥ $25, POL ≥ 50)
+    chain::check_and_rebalance(&client, &wallet).await?;
+
+    // 5. Check USDC.e balance and compute session limit (80%)
     let balance = chain::get_balance(&client, &wallet.address).await?;
     let max_session = balance * consts::MAX_BALANCE_FRACTION;
     eprintln!("USDC.e balance: ${:.2}", balance);
@@ -33,15 +37,15 @@ async fn main() -> Result<()> {
 
     if balance < 1.0 {
         return Err(anyhow::anyhow!(
-            "USDC.e balance too low (${:.2}). Deposit USDC.e to your wallet first.",
+            "USDC.e balance too low (${:.2}). Deposit funds to your wallet first.",
             balance
         ));
     }
 
-    // 5. Initialize copy state
+    // 6. Initialize copy state
     let mut state = copy::new_copy_state(max_session);
 
-    // 6. Startup alert
+    // 7. Startup alert
     eprintln!("Copy trading bot started.");
     eprintln!("Target: {} ({})", consts::TARGET_WALLET, "dustedfloor");
     eprintln!("Copy fraction: {:.2}% of target notional", consts::COPY_FRACTION * 100.0);
@@ -49,7 +53,25 @@ async fn main() -> Result<()> {
 
     alerts::send_startup(&client, balance, max_session).await;
 
-    // 7. Main polling loop
+    // 8. Spawn background balance check every 5 minutes
+    let balance_wallet = Arc::clone(&wallet);
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(
+            consts::BALANCE_CHECK_INTERVAL_SECS,
+        ));
+        // Skip the first tick (we already checked on startup)
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            if let Err(e) = chain::check_and_rebalance(&client, &balance_wallet).await {
+                eprintln!("Balance check error: {e:#}");
+            }
+        }
+    });
+
+    // 9. Main polling loop
     let mut interval = tokio::time::interval(Duration::from_secs(consts::POLL_INTERVAL_SECS));
 
     loop {
