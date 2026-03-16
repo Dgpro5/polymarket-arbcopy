@@ -418,6 +418,7 @@ async fn build_order(
     let signature = eip712_order_signature(
         &wallet.wallet,
         wallet.address,
+        wallet.proxy_address,
         token_id,
         maker_amount,
         taker_amount,
@@ -432,7 +433,7 @@ async fn build_order(
     Ok(CreateOrderRequest {
         order: PolymarketOrderStruct {
             salt,
-            maker: format!("{:#x}", wallet.address),
+            maker: format!("{:#x}", wallet.proxy_address),
             signer: format!("{:#x}", wallet.address),
             taker: ZERO_ADDRESS.to_string(),
             token_id: token_id.to_string(),
@@ -443,7 +444,7 @@ async fn build_order(
             nonce: "0".to_string(),
             fee_rate_bps: fee_bps.to_string(),
             signature,
-            signature_type: 0,
+            signature_type: 1, // POLY_PROXY
         },
         owner: wallet.creds.api_key.clone(),
         order_type: "FAK".to_string(),
@@ -453,7 +454,8 @@ async fn build_order(
 
 async fn eip712_order_signature(
     wallet: &LocalWallet,
-    address: Address,
+    signer_address: Address,
+    proxy_address: Address,
     token_id: &str,
     maker_amount: u128,
     taker_amount: u128,
@@ -494,12 +496,12 @@ async fn eip712_order_signature(
             ]
         },
         "message": {
-            "salt": salt.to_string(), "maker": format!("{:#x}", address),
-            "signer": format!("{:#x}", address), "taker": ZERO_ADDRESS,
+            "salt": salt.to_string(), "maker": format!("{:#x}", proxy_address),
+            "signer": format!("{:#x}", signer_address), "taker": ZERO_ADDRESS,
             "tokenId": token_id, "makerAmount": maker_amount.to_string(),
             "takerAmount": taker_amount.to_string(), "expiration": expiration.to_string(),
             "nonce": "0", "feeRateBps": fee_bps.to_string(),
-            "side": side, "signatureType": 0u8
+            "side": side, "signatureType": 1u8
         }
     }))?;
 

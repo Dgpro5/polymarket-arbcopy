@@ -26,6 +26,7 @@ pub struct ApiCredentials {
 pub struct TradingWallet {
     pub wallet: LocalWallet,
     pub address: Address,
+    pub proxy_address: Address,
     pub creds: ApiCredentials,
 }
 
@@ -42,10 +43,13 @@ pub async fn setup_wallet(private_key: &str) -> Result<Arc<TradingWallet>> {
     eprintln!("Wallet: {:#x}", address);
 
     let creds = get_or_create_api_creds(&wallet_signer, address, &client).await?;
+    let proxy_address = get_proxy_wallet(&client, address, &creds).await?;
+    eprintln!("Proxy wallet: {:#x}", proxy_address);
 
     Ok(Arc::new(TradingWallet {
         wallet: wallet_signer,
         address,
+        proxy_address,
         creds,
     }))
 }
@@ -178,6 +182,41 @@ async fn get_or_create_api_creds(
         secret: secret.into(),
         passphrase: passphrase.into(),
     })
+}
+
+// ── Proxy wallet lookup ──────────────────────────────────────────────────────
+
+async fn get_proxy_wallet(
+    client: &Client,
+    address: Address,
+    creds: &ApiCredentials,
+) -> Result<Address> {
+    let ts = now_secs();
+    let sig = l2_signature(&creds.secret, ts, "GET", "/proxy-wallet-address", "")?;
+    let addr_str = format!("{:#x}", address);
+
+    let resp = client
+        .get(format!("{CLOB_API}/proxy-wallet-address"))
+        .header("POLY_ADDRESS", &addr_str)
+        .header("POLY_SIGNATURE", &sig)
+        .header("POLY_TIMESTAMP", ts.to_string())
+        .header("POLY_API_KEY", &creds.api_key)
+        .header("POLY_PASSPHRASE", &creds.passphrase)
+        .send()
+        .await
+        .context("fetch proxy wallet")?;
+
+    let body: Value = resp.json().await.context("parse proxy wallet response")?;
+
+    let proxy_str = body
+        .get("address")
+        .or_else(|| body.get("proxyAddress"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("no proxy wallet in response: {body}"))?;
+
+    proxy_str
+        .parse::<Address>()
+        .context("parse proxy wallet address")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
