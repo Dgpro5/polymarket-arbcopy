@@ -26,6 +26,9 @@ pub const POLL_INTERVAL_SECS: u64 = 10;
 /// Example: target spends $27.62 → we spend $27.62 * 0.0724 ≈ $2.00.
 pub const COPY_FRACTION: f64 = 0.0724;
 
+/// Minimum USD to spend per copy trade (floor).
+pub const MIN_COPY_USD: f64 = 2.0;
+
 /// Maximum fraction of USDC.e balance to deploy in a session.
 pub const MAX_BALANCE_FRACTION: f64 = 0.80;
 
