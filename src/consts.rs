@@ -13,6 +13,14 @@ pub const TARGET_WALLET: &str = "0x571c285a83eba5322b5f916ba681669dc368a61f";
 /// How often to poll the data API for new trades (milliseconds).
 pub const POLL_INTERVAL_MS: u64 = 300;
 
+/// How often to send the arb summary to Discord (seconds).
+pub const REPORT_INTERVAL_SECS: u64 = 300;
+
+// ── Data storage ────────────────────────────────────────────────────────────
+
+pub const DATA_DIR: &str = "data";
+pub const ARB_FILE: &str = "data/arb_opportunities.json";
+
 // ── Discord webhooks ────────────────────────────────────────────────────────
 
 pub const DISCORD_WEBHOOK_URL: &str =

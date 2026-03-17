@@ -3,32 +3,50 @@
 use reqwest::Client;
 use serde_json::json;
 
-use crate::consts::{DISCORD_WEBHOOK_URL, ERROR_DISCORD_WEBHOOK_URL, POLL_INTERVAL_MS};
+use crate::consts::{DISCORD_WEBHOOK_URL, ERROR_DISCORD_WEBHOOK_URL, POLL_INTERVAL_MS, REPORT_INTERVAL_SECS};
+use crate::copy::ReportData;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 pub async fn send_startup(client: &Client) {
     let msg = format!(
-        "**Trade Tracker Started**\nTarget: `dustedfloor`\nPolling every **{}ms**",
-        POLL_INTERVAL_MS
+        "**Trade Tracker Started**\nTarget: `dustedfloor`\nPolling every **{}ms** | Reports every **{}m**",
+        POLL_INTERVAL_MS,
+        REPORT_INTERVAL_SECS / 60
     );
     send_main(client, &msg).await;
 }
 
-pub async fn send_trade_detected(
-    client: &Client,
-    side: &str,
-    market: &str,
-    outcome: &str,
-    price: f64,
-    shares: f64,
-    notional: f64,
-    tx_hash: &str,
-) {
-    let msg = format!(
-        "**TRADE DETECTED**\nSide: **{}**\nMarket: `{}`\nOutcome: **{}**\nPrice: **{:.4}**\nShares: **{:.2}**\nNotional: **${:.2}**\nTx: `{}`",
-        side, market, outcome, price, shares, notional, tx_hash
+pub async fn send_arb_report(client: &Client, report: &ReportData) {
+    let mut msg = format!(
+        "**📊 5-MIN ARB REPORT**\nTrades detected: **{}**\nNew arb matches: **{}**\nAll-time arbs: **{}**\nPending unmatched legs: **{}**",
+        report.trades_detected,
+        report.new_matches.len(),
+        report.all_time_arb_count,
+        report.pending_legs
     );
+
+    if !report.new_matches.is_empty() {
+        msg.push_str("\n\n**Top Arb Opportunities (by spread):**");
+        // Show up to 10 best matches
+        for (i, arb) in report.new_matches.iter().take(10).enumerate() {
+            msg.push_str(&format!(
+                "\n{}. `{}` — Yes **{:.1}c** + No **{:.1}c** = **{:.1}c** | spread **{:.1}c** | **{:.2}** shares | profit **${:.4}**",
+                i + 1,
+                arb.title,
+                arb.yes_price * 100.0,
+                arb.no_price * 100.0,
+                (arb.yes_price + arb.no_price) * 100.0,
+                arb.spread * 100.0,
+                arb.matched_shares,
+                arb.profit_usd
+            ));
+        }
+        if report.new_matches.len() > 10 {
+            msg.push_str(&format!("\n… and {} more", report.new_matches.len() - 10));
+        }
+    }
+
     send_main(client, &msg).await;
 }
 
