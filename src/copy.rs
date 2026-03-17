@@ -82,7 +82,7 @@ pub struct TrackingState {
     pub last_poll_ts: i64,
     pub seen_trade_ids: HashSet<String>,
     pub arb_data: ArbData,
-    /// Trades detected since last report (for the 5-min summary).
+    /// Trades detected since last report (for the 30-min summary).
     pub trades_since_report: u32,
     /// Arb matches found since last report.
     pub new_matches_since_report: Vec<ArbMatch>,
@@ -90,6 +90,11 @@ pub struct TrackingState {
     pub total_spent_since_report: f64,
     /// Total USDC received from SELL trades since last report.
     pub total_sell_proceeds_since_report: f64,
+    // ── Cumulative 6h tracking ──
+    pub trades_since_big_report: u32,
+    pub matches_since_big_report: Vec<ArbMatch>,
+    pub total_spent_since_big_report: f64,
+    pub total_sell_proceeds_since_big_report: f64,
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -110,6 +115,10 @@ pub fn new_tracking_state() -> TrackingState {
         new_matches_since_report: Vec::new(),
         total_spent_since_report: 0.0,
         total_sell_proceeds_since_report: 0.0,
+        trades_since_big_report: 0,
+        matches_since_big_report: Vec::new(),
+        total_spent_since_big_report: 0.0,
+        total_sell_proceeds_since_big_report: 0.0,
     }
 }
 
@@ -134,10 +143,12 @@ pub async fn poll_and_track(client: &Client, state: &mut TrackingState) -> Resul
         }
         state.seen_trade_ids.insert(trade.transaction_hash.clone());
         state.trades_since_report += 1;
+        state.trades_since_big_report += 1;
 
         // Only BUY trades form arb legs (buying both sides of a market).
         if trade.side != "BUY" {
             state.total_sell_proceeds_since_report += trade.usdc_size;
+            state.total_sell_proceeds_since_big_report += trade.usdc_size;
             eprintln!(
                 "Trade (SELL, skipping arb): {} {:.2}@{:.4} | {}",
                 trade.title, trade.size, trade.price, trade.outcome
@@ -146,6 +157,7 @@ pub async fn poll_and_track(client: &Client, state: &mut TrackingState) -> Resul
         }
 
         state.total_spent_since_report += trade.usdc_size;
+        state.total_spent_since_big_report += trade.usdc_size;
 
         eprintln!(
             "Trade: BUY {} {:.2}@{:.4} | {}",
@@ -171,7 +183,7 @@ pub async fn poll_and_track(client: &Client, state: &mut TrackingState) -> Resul
     Ok(())
 }
 
-/// Take the report data, reset counters, and clear arb data file. Called every 5 minutes.
+/// Take the report data, reset counters, and clear arb data file. Called every 30 minutes.
 pub fn take_report(state: &mut TrackingState) -> ReportData {
     let mut new_matches = std::mem::take(&mut state.new_matches_since_report);
     // Sort by spread descending (biggest arb first).
@@ -227,6 +239,38 @@ pub struct ReportData {
     pub arb_profit: f64,
     /// Total USDC locked in unmatched legs (open exposure).
     pub unmatched_exposure: f64,
+}
+
+/// Take the 6h big report data and reset cumulative counters.
+pub fn take_big_report(state: &mut TrackingState) -> BigReportData {
+    let mut all_matches = std::mem::take(&mut state.matches_since_big_report);
+    all_matches.sort_by(|a, b| b.spread.partial_cmp(&a.spread).unwrap_or(std::cmp::Ordering::Equal));
+
+    let arb_profit: f64 = all_matches.iter().map(|m| m.profit_usd).sum();
+    let total_spent = state.total_spent_since_big_report;
+    let total_sell_proceeds = state.total_sell_proceeds_since_big_report;
+    let trades = state.trades_since_big_report;
+
+    // Reset 6h counters
+    state.trades_since_big_report = 0;
+    state.total_spent_since_big_report = 0.0;
+    state.total_sell_proceeds_since_big_report = 0.0;
+
+    BigReportData {
+        trades_detected: trades,
+        all_matches,
+        total_spent,
+        total_sell_proceeds,
+        arb_profit,
+    }
+}
+
+pub struct BigReportData {
+    pub trades_detected: u32,
+    pub all_matches: Vec<ArbMatch>,
+    pub total_spent: f64,
+    pub total_sell_proceeds: f64,
+    pub arb_profit: f64,
 }
 
 // ── Arb matching ─────────────────────────────────────────────────────────────
@@ -305,6 +349,7 @@ fn try_match_arb(state: &mut TrackingState, new_leg: UnmatchedLeg) {
         }
 
         state.new_matches_since_report.push(arb.clone());
+        state.matches_since_big_report.push(arb.clone());
         state.arb_data.matches.push(arb);
     } else {
         // No match found — store as unmatched.
