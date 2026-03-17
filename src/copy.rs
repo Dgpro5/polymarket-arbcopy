@@ -383,16 +383,17 @@ async fn build_order(
 ) -> Result<CreateOrderRequest> {
     let side_uint: u8 = if side == "BUY" { 0 } else { 1 };
 
-    // Amounts use 6 decimal places (same as USDC).
-    // BUY: makerAmount = USDC to spend, takerAmount = tokens to receive.
-    // SELL: makerAmount = tokens to give, takerAmount = USDC to receive.
+    // Polymarket precision: USDC amounts → 2 decimal places, share amounts → 4 decimal places.
+    // In raw 6-decimal units: USDC rounds to nearest 10_000, shares rounds to nearest 100.
     let (maker_amount, taker_amount) = if side_uint == 0 {
-        let maker = (price * shares * 1_000_000.0).round() as u128;
-        let taker = (shares * 1_000_000.0).round() as u128;
+        // BUY: maker=USDC (2 dec max), taker=shares (4 dec max)
+        let maker = ((price * shares * 100.0).floor() as u128) * 10_000;
+        let taker = ((shares * 10_000.0).floor() as u128) * 100;
         (maker, taker)
     } else {
-        let maker = (shares * 1_000_000.0).round() as u128;
-        let taker = (price * shares * 1_000_000.0).round() as u128;
+        // SELL: maker=shares (4 dec max), taker=USDC (2 dec max)
+        let maker = ((shares * 10_000.0).floor() as u128) * 100;
+        let taker = ((price * shares * 100.0).floor() as u128) * 10_000;
         (maker, taker)
     };
 
