@@ -18,12 +18,31 @@ pub async fn send_startup(client: &Client) {
 }
 
 pub async fn send_arb_report(client: &Client, report: &ReportData) {
+    let net_pnl = report.arb_profit + report.total_sell_proceeds - report.total_spent;
+    let pnl_emoji = if net_pnl >= 0.0 { "🟢" } else { "🔴" };
+
     let mut msg = format!(
-        "**📊 5-MIN ARB REPORT**\nTrades detected: **{}**\nNew arb matches: **{}**\nAll-time arbs: **{}**\nPending unmatched legs: **{}**",
+        "**📊 5-MIN ARB REPORT**\n\
+         Trades detected: **{}**\n\
+         New arb matches: **{}**\n\
+         All-time arbs: **{}**\n\
+         Pending unmatched legs: **{}**\n\n\
+         **💰 P&L SUMMARY**\n\
+         Total spent (buys): **${:.2}**\n\
+         Total received (sells): **${:.2}**\n\
+         Arb profit (matched): **${:.4}**\n\
+         Unmatched exposure: **${:.2}**\n\
+         {} Net P&L: **${:.4}**",
         report.trades_detected,
         report.new_matches.len(),
         report.all_time_arb_count,
-        report.pending_legs
+        report.pending_legs,
+        report.total_spent,
+        report.total_sell_proceeds,
+        report.arb_profit,
+        report.unmatched_exposure,
+        pnl_emoji,
+        net_pnl
     );
 
     if !report.new_matches.is_empty() {
