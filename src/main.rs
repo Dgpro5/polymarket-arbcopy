@@ -10,6 +10,9 @@ use std::time::Duration;
 async fn main() -> Result<()> {
     fs::create_dir_all(consts::DATA_DIR)?;
 
+    // Clear arb_opportunities.json on startup (fresh start).
+    copy::clear_arb_file();
+
     let client = reqwest::Client::new();
     let mut state = copy::new_tracking_state();
 

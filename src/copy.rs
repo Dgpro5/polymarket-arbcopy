@@ -86,9 +86,19 @@ pub struct TrackingState {
     pub trades_since_report: u32,
     /// Arb matches found since last report.
     pub new_matches_since_report: Vec<ArbMatch>,
+    /// Total USDC spent on BUY trades since last report.
+    pub total_spent_since_report: f64,
+    /// Total USDC received from SELL trades since last report.
+    pub total_sell_proceeds_since_report: f64,
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
+
+/// Clear the arb_opportunities.json file (write empty state).
+pub fn clear_arb_file() {
+    save_arb_data(&ArbData::default());
+    eprintln!("Cleared arb_opportunities.json on startup.");
+}
 
 pub fn new_tracking_state() -> TrackingState {
     let arb_data = load_arb_data();
@@ -98,6 +108,8 @@ pub fn new_tracking_state() -> TrackingState {
         arb_data,
         trades_since_report: 0,
         new_matches_since_report: Vec::new(),
+        total_spent_since_report: 0.0,
+        total_sell_proceeds_since_report: 0.0,
     }
 }
 
@@ -125,12 +137,15 @@ pub async fn poll_and_track(client: &Client, state: &mut TrackingState) -> Resul
 
         // Only BUY trades form arb legs (buying both sides of a market).
         if trade.side != "BUY" {
+            state.total_sell_proceeds_since_report += trade.usdc_size;
             eprintln!(
                 "Trade (SELL, skipping arb): {} {:.2}@{:.4} | {}",
                 trade.title, trade.size, trade.price, trade.outcome
             );
             continue;
         }
+
+        state.total_spent_since_report += trade.usdc_size;
 
         eprintln!(
             "Trade: BUY {} {:.2}@{:.4} | {}",
@@ -156,7 +171,7 @@ pub async fn poll_and_track(client: &Client, state: &mut TrackingState) -> Resul
     Ok(())
 }
 
-/// Take the report data and reset counters. Called every 5 minutes.
+/// Take the report data, reset counters, and clear arb data file. Called every 5 minutes.
 pub fn take_report(state: &mut TrackingState) -> ReportData {
     let mut new_matches = std::mem::take(&mut state.new_matches_since_report);
     // Sort by spread descending (biggest arb first).
@@ -166,13 +181,36 @@ pub fn take_report(state: &mut TrackingState) -> ReportData {
     let unmatched_count: usize = state.arb_data.unmatched.values().map(|v| v.len()).sum();
     let trades = state.trades_since_report;
 
+    // Calculate P&L
+    let arb_profit: f64 = new_matches.iter().map(|m| m.profit_usd).sum();
+    let unmatched_exposure: f64 = state.arb_data.unmatched.values()
+        .flat_map(|legs| legs.iter())
+        .map(|leg| leg.price * leg.size)
+        .sum();
+
+    let total_spent = state.total_spent_since_report;
+    let total_sell_proceeds = state.total_sell_proceeds_since_report;
+
+    // Reset counters
     state.trades_since_report = 0;
+    state.total_spent_since_report = 0.0;
+    state.total_sell_proceeds_since_report = 0.0;
+
+    // Clear arb data and save empty file
+    state.arb_data = ArbData::default();
+    state.seen_trade_ids.clear();
+    save_arb_data(&state.arb_data);
+    eprintln!("Cleared arb_opportunities.json after report.");
 
     ReportData {
         trades_detected: trades,
         new_matches,
         all_time_arb_count: all_time_count,
         pending_legs: unmatched_count,
+        total_spent,
+        total_sell_proceeds,
+        arb_profit,
+        unmatched_exposure,
     }
 }
 
@@ -181,6 +219,14 @@ pub struct ReportData {
     pub new_matches: Vec<ArbMatch>,
     pub all_time_arb_count: usize,
     pub pending_legs: usize,
+    /// Total USDC spent on BUY trades this period.
+    pub total_spent: f64,
+    /// Total USDC received from SELL trades this period.
+    pub total_sell_proceeds: f64,
+    /// Total profit from matched arbs this period.
+    pub arb_profit: f64,
+    /// Total USDC locked in unmatched legs (open exposure).
+    pub unmatched_exposure: f64,
 }
 
 // ── Arb matching ─────────────────────────────────────────────────────────────
