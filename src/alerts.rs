@@ -1,52 +1,39 @@
-// Discord webhook alerts for the copy trading bot.
-//
-// Main webhook   → startup, successful copy trades.
-// Error webhook  → failed orders, polling errors.
+// Discord webhook alerts for the trade tracker.
 
 use reqwest::Client;
 use serde_json::json;
 
-use crate::consts::{DISCORD_WEBHOOK_URL, ERROR_DISCORD_WEBHOOK_URL};
+use crate::consts::{DISCORD_WEBHOOK_URL, ERROR_DISCORD_WEBHOOK_URL, POLL_INTERVAL_MS};
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-pub async fn send_startup(client: &Client, balance: f64, max_session: f64) {
+pub async fn send_startup(client: &Client) {
     let msg = format!(
-        "**Copy Trading Bot Started**\nBalance: **${:.2}** USDC.e\nSession limit: **${:.2}** (80%)\nPolling every **10s**",
-        balance, max_session
+        "**Trade Tracker Started**\nTarget: `dustedfloor`\nPolling every **{}ms**",
+        POLL_INTERVAL_MS
     );
     send_main(client, &msg).await;
 }
 
-pub async fn send_copy_success(
+pub async fn send_trade_detected(
     client: &Client,
     side: &str,
     market: &str,
+    outcome: &str,
     price: f64,
     shares: f64,
-    copy_usd: f64,
-    order_id: &str,
+    notional: f64,
+    tx_hash: &str,
 ) {
     let msg = format!(
-        "**COPY TRADE PLACED**\nSide: **{}**\nMarket: `{}`\nPrice: **{:.4}**\nShares: **{:.2}**\nCost: **${:.2}**\nOrder: `{}`",
-        side, market, price, shares, copy_usd, order_id
+        "**TRADE DETECTED**\nSide: **{}**\nMarket: `{}`\nOutcome: **{}**\nPrice: **{:.4}**\nShares: **{:.2}**\nNotional: **${:.2}**\nTx: `{}`",
+        side, market, outcome, price, shares, notional, tx_hash
     );
     send_main(client, &msg).await;
 }
 
-pub async fn send_copy_error(client: &Client, context: &str, error: &str) {
-    let msg = format!(
-        "**COPY TRADE FAILED**\nContext: `{}`\nError:\n```\n{}\n```",
-        context, error
-    );
-    send_error(client, &msg).await;
-}
-
 pub async fn send_poll_error(client: &Client, error: &str) {
-    let msg = format!(
-        "**POLL ERROR**\n```\n{}\n```",
-        error
-    );
+    let msg = format!("**POLL ERROR**\n```\n{}\n```", error);
     send_error(client, &msg).await;
 }
 
