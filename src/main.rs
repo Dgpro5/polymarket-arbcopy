@@ -18,14 +18,16 @@ async fn main() -> Result<()> {
 
     eprintln!("Trade tracker started.");
     eprintln!("Target: {} (dustedfloor)", consts::TARGET_WALLET);
-    eprintln!("Poll interval: {}ms | Report interval: {}m", consts::POLL_INTERVAL_MS, consts::REPORT_INTERVAL_SECS / 60);
+    eprintln!("Poll interval: {}ms | Report interval: {}m | Big report: 6h", consts::POLL_INTERVAL_MS, consts::REPORT_INTERVAL_SECS / 60);
 
     alerts::send_startup(&client).await;
 
     let mut poll_interval = tokio::time::interval(Duration::from_millis(consts::POLL_INTERVAL_MS));
     let mut report_interval = tokio::time::interval(Duration::from_secs(consts::REPORT_INTERVAL_SECS));
-    // Skip the first report tick (don't send an empty report on startup).
+    let mut big_report_interval = tokio::time::interval(Duration::from_secs(consts::BIG_REPORT_INTERVAL_SECS));
+    // Skip the first ticks (don't send empty reports on startup).
     report_interval.tick().await;
+    big_report_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -42,11 +44,20 @@ async fn main() -> Result<()> {
             _ = report_interval.tick() => {
                 let report = copy::take_report(&mut state);
                 eprintln!(
-                    "Sending 5-min report: {} trades, {} new arbs, {} all-time, {} pending",
+                    "Sending 30-min report: {} trades, {} new arbs, {} all-time, {} pending",
                     report.trades_detected, report.new_matches.len(),
                     report.all_time_arb_count, report.pending_legs
                 );
                 alerts::send_arb_report(&client, &report).await;
+            }
+            _ = big_report_interval.tick() => {
+                let big_report = copy::take_big_report(&mut state);
+                eprintln!(
+                    "Sending 6h report: {} trades, {} arb matches, ${:.4} profit",
+                    big_report.trades_detected, big_report.all_matches.len(),
+                    big_report.arb_profit
+                );
+                alerts::send_big_report(&client, &big_report).await;
             }
         }
     }
